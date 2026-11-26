@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pose Task</title>
+<style>
+:root{--sea:#0f3b4c;--deep:#0a2733;--chalk:#e9f1ee;--brass:#e0a526;--ok:#7fd49a;--bad:#ff8a7a}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--sea);color:var(--chalk);font:17px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:24px 20px 48px}
+main{max-width:480px;margin:0 auto}
+.glyph{font:800 9rem/0.9 Georgia,serif;color:transparent;-webkit-text-stroke:3px var(--brass);margin:0 0 8px}
+h1{font-size:1.5rem;margin:0 0 6px}
+p{margin:0 0 14px}
+.rules{border-left:4px solid var(--brass);padding-left:14px;margin:18px 0}
+button{width:100%;padding:16px;font:700 1.05rem system-ui,sans-serif;background:var(--brass);color:var(--deep);border:0;border-radius:8px}
+button:disabled{opacity:.45}
+button:focus-visible{outline:3px solid var(--chalk);outline-offset:3px}
+input{display:none}
+canvas{display:none;width:100%;margin-top:18px;border-radius:8px}
+#out{display:none;margin-top:18px;padding:16px;border-radius:8px;background:var(--deep)}
+#out.ok{border:2px solid var(--ok)}
+#out.bad{border:2px solid var(--bad)}
+#clue{font-size:1.3rem;font-weight:700;margin:8px 0 0}
+ul{margin:8px 0 0;padding-left:20px}
+pre{white-space:pre-wrap;font-size:.8rem;opacity:.8}
+</style>
+</head>
+<body>
+<main>
+  <div class="glyph" aria-hidden="true">A</div>
+  <h1>Make the letter A with your team</h1>
+  <p>Three or four of you, all in one photo.</p>
+  <div class="rules">
+    <p>The two people on the outside lean in and join hands above their heads.</p>
+    <p>Everyone in between stretches their arms out sideways to make the crossbar.</p>
+    <p>Keep every full body in the frame.</p>
+  </div>
+  <button id="go" disabled>Loading pose checker…</button>
+  <input id="file" type="file" accept="image/*">
+  <canvas id="cv"></canvas>
+  <div id="out" role="status" aria-live="polite"></div>
+</main>
+
+<script type="module">
+import {PoseLandmarker, FilesetResolver, DrawingUtils} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+
+/* ---- SETTINGS ---------------------------------------------------------
+   clueB64: the clue, base64-encoded so it is not readable in the page source.
+            Make one in any browser console:
+            btoa(String.fromCharCode(...new TextEncoder().encode("your clue")))
+   tol:     1 = normal. Raise (1.3, 1.5) to be more forgiving, lower to be stricter.
+   Add ?debug=1 to the page link to see which checks pass or fail.
+------------------------------------------------------------------------- */
+const CONFIG = {minPeople: 3, maxPeople: 4, tol: 1.0, clueB64: "WW91ciBjbHVlIGdvZXMgaGVyZS4gUmVwbGFjZSB0aGlzIHRleHQgYmVmb3JlIHRoZSBldmVudC4="};
+
+const $ = id => document.getElementById(id);
+const debug = new URLSearchParams(location.search).has("debug");
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const mid = (a, b) => ({x: (a.x + b.x) / 2, y: (a.y + b.y) / 2});
+let landmarker;
+
+async function init() {
+  const files = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  landmarker = await PoseLandmarker.createFromOptions(files, {
+    baseOptions: {modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"},
+    runningMode: "IMAGE",
+    numPoses: CONFIG.maxPeople + 1,
+    minPoseDetectionConfidence: 0.4
+  });
+  $("go").disabled = false;
+  $("go").textContent = "Take or upload your photo";
+}
+
+// Turns each detected person into pixel-space points (so angles are not distorted by photo shape).
+function toPeople(poses, W, H) {
+  return poses.map(l => {
+    const p = i => ({x: l[i].x * W, y: l[i].y * H, v: l[i].visibility ?? 1});
+    const o = {nose: p(0), ls: p(11), rs: p(12), lw: p(15), rw: p(16), lh: p(23), rh: p(24)};
+    o.sh = mid(o.ls, o.rs);
+    o.hip = mid(o.lh, o.rh);
+    o.torso = dist(o.sh, o.hip) || 1;
+    o.conf = (o.ls.v + o.rs.v + o.lh.v + o.rh.v) / 4;
+    o.high = o.lw.y < o.rw.y ? o.lw : o.rw;
+    return o;
+  }).filter(o => o.conf > 0.5).sort((a, b) => a.hip.x - b.hip.x);
+}
+
+function checkA(people) {
+  const t = CONFIG.tol, checks = [];
+  const add = (ok, name, hint) => checks.push({ok, name, hint});
+  const n = people.length;
+  add(n >= CONFIG.minPeople && n <= CONFIG.maxPeople, `people found: ${n}`,
+      `We found ${n} ${n === 1 ? "person" : "people"}. You need ${CONFIG.minPeople} to ${CONFIG.maxPeople}, all fully visible.`);
+  if (n < CONFIG.minPeople || n > CONFIG.maxPeople) return checks;
+
+  const L = people[0], R = people[n - 1], inner = people.slice(1, -1);
+  const gap = Math.abs(R.hip.x - L.hip.x) || 1;
+  const avgTorso = people.reduce((s, q) => s + q.torso, 0) / n;
+
+  add(L.nose.x - L.hip.x > 0.15 * L.torso / t, "left person leans in", "The person on the far left should lean toward the middle.");
+  add(R.hip.x - R.nose.x > 0.15 * R.torso / t, "right person leans in", "The person on the far right should lean toward the middle.");
+  add(L.high.y < L.nose.y + 0.25 * L.torso * t && R.high.y < R.nose.y + 0.25 * R.torso * t, "hands raised above heads", "The two outside people should raise a hand above their heads.");
+  const wristGap = dist(L.high, R.high);
+  add(wristGap < Math.max(0.45 * gap, 0.6 * avgTorso) * t, "hands meet at the top", "The outside people’s hands should meet above their heads, like the peak of an A.");
+
+  const wr = inner.flatMap(q => [q.lw, q.rw]);
+  const levelOk = inner.every(q => Math.abs(q.lw.y - q.rw.y) < 0.5 * q.torso * t);
+  const heightOk = inner.every(q => [q.lw, q.rw].every(w => w.y > q.sh.y - 0.3 * q.torso * t && w.y < q.hip.y + 0.3 * q.torso * t));
+  add(levelOk && heightOk, "crossbar arms level", "The people in the middle should hold both arms out sideways at chest height, level with each other.");
+  const span = Math.max(...wr.map(w => w.x)) - Math.min(...wr.map(w => w.x));
+  add(span > 0.5 * gap / t, "crossbar wide enough", "The people in the middle should stretch their arms out wider to form a crossbar.");
+  return checks;
+}
+
+function reveal() {
+  const bytes = Uint8Array.from(atob(CONFIG.clueB64), c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+$("go").onclick = () => $("file").click();
+$("file").onchange = async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const go = $("go"), out = $("out"), cv = $("cv"), ctx = cv.getContext("2d");
+  go.disabled = true; go.textContent = "Checking your pose…";
+  try {
+    const bmp = await createImageBitmap(f, {imageOrientation: "from-image"});
+    const s = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+    cv.width = Math.round(bmp.width * s); cv.height = Math.round(bmp.height * s);
+    ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
+    const res = landmarker.detect(cv);
+    const people = toPeople(res.landmarks, cv.width, cv.height);
+    const du = new DrawingUtils(ctx);
+    res.landmarks.forEach(l => {
+      du.drawConnectors(l, PoseLandmarker.POSE_CONNECTIONS, {color: "#e9f1ee", lineWidth: 3});
+      du.drawLandmarks(l, {radius: 4, color: "#e0a526"});
+    });
+    cv.style.display = "block";
+    const checks = checkA(people);
+    const failed = checks.filter(c => !c.ok);
+    const log = debug ? "<pre>" + checks.map(c => (c.ok ? "PASS " : "FAIL ") + c.name).join("\n") + "</pre>" : "";
+    if (!failed.length) {
+      out.className = "ok";
+      out.innerHTML = `<strong>That’s an A. Here is your clue:</strong><p id="clue"></p>${log}`;
+      $("clue").textContent = reveal();
+    } else {
+      out.className = "bad";
+      out.innerHTML = `<strong>Not quite yet. Try again:</strong><ul>${failed.slice(0, 2).map(c => `<li>${c.hint}</li>`).join("")}</ul>${log}`;
+    }
+    out.style.display = "block";
+  } catch (err) {
+    out.className = "bad";
+    out.innerHTML = "<strong>Something went wrong reading that photo.</strong><p>Try taking it again.</p>";
+    out.style.display = "block";
+  }
+  go.disabled = false; go.textContent = "Take or upload another photo";
+  e.target.value = "";
+};
+
+init().catch(() => { $("go").textContent = "Couldn’t load. Check your connection and refresh."; });
+</script>
+</body>
+</html>
