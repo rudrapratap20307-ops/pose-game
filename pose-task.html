@@ -36,7 +36,7 @@ pre{white-space:pre-wrap;font-size:.8rem;opacity:.8}
 <main>
   <div class="glyph" id="glyph" aria-hidden="true">A</div>
   <h1>Spell ACE with your team</h1>
-  <p>Use as many people as you like. Take one photo per letter, from the side, with every full body in the frame and a plain background behind you.</p>
+  <p>Use as many people as you like. Take one photo per letter, from the side, with every full body in the frame. Stay clear of other people walking by.</p>
   <div class="chips" id="chips"></div>
   <figure class="ref" id="refbox"><img id="ref" alt="Example of people forming the letter"><figcaption>Make a shape like this one.</figcaption></figure>
   <button id="go" disabled>Loading checker…</button>
@@ -146,10 +146,44 @@ function render() {
   $("go").textContent = `Take or upload your photo of ${cur}`;
 }
 
+/* Keeps the main group (and any large pieces of it) and drops small separate blobs, like bystanders. */
+function keepMain(bin, w, h) {
+  let d = bin;
+  for (let k = 0; k < 2; k++) {
+    const n = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (!d[y * w + x]) continue;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy;
+        if (xx >= 0 && xx < w && yy >= 0 && yy < h) n[yy * w + xx] = 1;
+      }
+    }
+    d = n;
+  }
+  const lab = new Int32Array(w * h), sizes = [0], stack = [];
+  for (let i = 0; i < w * h; i++) {
+    if (!d[i] || lab[i]) continue;
+    const id = sizes.length; let size = 0;
+    lab[i] = id; stack.push(i);
+    while (stack.length) {
+      const p = stack.pop(), x = p % w, y = (p - x) / w;
+      size += bin[p];
+      if (x > 0 && d[p - 1] && !lab[p - 1]) { lab[p - 1] = id; stack.push(p - 1); }
+      if (x < w - 1 && d[p + 1] && !lab[p + 1]) { lab[p + 1] = id; stack.push(p + 1); }
+      if (y > 0 && d[p - w] && !lab[p - w]) { lab[p - w] = id; stack.push(p - w); }
+      if (y < h - 1 && d[p + w] && !lab[p + w]) { lab[p + w] = id; stack.push(p + w); }
+    }
+    sizes.push(size);
+  }
+  const max = Math.max(...sizes);
+  for (let i = 0; i < w * h; i++) if (bin[i] && sizes[lab[i]] < 0.15 * max) bin[i] = 0;
+}
+
 function silhouette(cv) {
   const r = seg.segment(cv), m = r.categoryMask;
   const arr = m.getAsUint8Array(), w = m.width, h = m.height, bin = new Uint8Array(w * h);
   for (let i = 0; i < bin.length; i++) bin[i] = arr[i] === PERSON ? 1 : 0;
+  keepMain(bin, w, h);
   m.close(); r.close?.();
   return {bin, w, h};
 }
@@ -178,7 +212,7 @@ $("file").onchange = async e => {
     const grid = toGrid(bin, w, h);
     let html, cls;
     if (!grid) {
-      cls = "bad"; html = "<strong>We couldn’t see anyone in that photo.</strong><p>Step back so everyone’s full body is in the frame, with a plain background.</p>";
+      cls = "bad"; html = "<strong>We couldn’t see anyone in that photo.</strong><p>Step back so everyone’s full body is in the frame, in good light.</p>";
     } else {
       const scores = Object.entries(templates).map(([ch, g]) => [ch, corr(grid, g)]).sort((a, b) => b[1] - a[1]);
       const rank = scores.findIndex(q => q[0] === cur), sc = scores[rank][1];
@@ -195,7 +229,7 @@ $("file").onchange = async e => {
         }
       } else {
         cls = "bad";
-        html = `<strong>Not quite ${cur} yet. Try again:</strong><ul><li>Make the whole group one connected shape.</li><li>Shoot from the side, and keep every body fully in frame.</li><li>Use a plain background and stand clear of other people.</li></ul>${log}`;
+        html = `<strong>Not quite ${cur} yet. Try again:</strong><ul><li>Make the whole group one connected shape.</li><li>Shoot from the side, and keep every body fully in frame.</li><li>Stand clear of other people, and don’t shoot into the sun.</li></ul>${log}`;
       }
     }
     out.className = cls; out.innerHTML = html; out.style.display = "block";
